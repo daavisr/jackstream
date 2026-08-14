@@ -1,6 +1,7 @@
 package bt
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,9 +46,14 @@ type Client struct {
 }
 
 var (
-	ErrNotFound   = errors.New("torrent_not_found")
-	ErrFetchFail  = errors.New("torrent_fetch_failed")
-	ErrStreamTimo = errors.New("stream_timeout")
+	ErrNotFound  = errors.New("torrent_not_found")
+	ErrFetchFail = errors.New("torrent_fetch_failed")
+)
+
+// Sanity caps for the Jackett-proxied .torrent download.
+const (
+	torrentFetchTimeout = 30 * time.Second
+	torrentFetchMaxSize = 32 << 20
 )
 
 func streamReadyTimeout() time.Duration {
@@ -67,7 +74,10 @@ func idleTimeout() time.Duration {
 
 func NewClient() (*Client, error) {
 	cfg := torrent.NewDefaultClientConfig()
-	cfg.DataDir = "/tmp/jackstream"
+	cfg.DataDir = os.Getenv("DATA_DIR")
+	if cfg.DataDir == "" {
+		cfg.DataDir = "/tmp/jackstream"
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir data dir: %w", err)
 	}
@@ -85,24 +95,36 @@ func NewClient() (*Client, error) {
 	}, nil
 }
 
-// dropAndDelete drops the torrent from the client AND removes its on-disk files.
-// Must be called with c.mu held. The active map entry for this torrentID MUST
-// still be present; the caller is responsible for removing it from c.active.
-func (c *Client) dropAndDelete(e *activeEntry) {
+// dropLocked drops the torrent from the client and returns the on-disk root
+// path of its data ("" if unknown). Must be called with c.mu held; the caller
+// removes the entry from c.active and deletes the returned path AFTER
+// releasing the lock, so slow disk I/O never blocks stream requests.
+func (c *Client) dropLocked(e *activeEntry) string {
 	// Capture the info name BEFORE Drop — after Drop, Info() may become nil.
 	var rootPath string
 	if info := e.t.Info(); info != nil && info.Name != "" && c.dataDir != "" {
-		rootPath = filepath.Join(c.dataDir, info.Name)
+		if p := filepath.Join(c.dataDir, info.Name); p != c.dataDir && p != "/" {
+			rootPath = p
+		}
 	}
 	e.t.Drop()
-	if rootPath != "" && rootPath != c.dataDir && rootPath != "/" {
-		if err := os.RemoveAll(rootPath); err != nil {
-			log.Printf("[bt] removeAll %q: %v", rootPath, err)
+	return rootPath
+}
+
+func removePaths(paths []string) {
+	for _, p := range paths {
+		if p == "" {
+			continue
+		}
+		if err := os.RemoveAll(p); err != nil {
+			log.Printf("[bt] removeAll %q: %v", p, err)
 		}
 	}
 }
 
 func fetchTorrentBuffer(ctx context.Context, url string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, torrentFetchTimeout)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -115,14 +137,14 @@ func fetchTorrentBuffer(ctx context.Context, url string) ([]byte, error) {
 	if res.StatusCode >= 300 {
 		return nil, fmt.Errorf(".torrent fetch %d", res.StatusCode)
 	}
-	return io.ReadAll(res.Body)
+	return io.ReadAll(io.LimitReader(res.Body, torrentFetchMaxSize))
 }
 
 func (c *Client) addNewTorrent(ctx context.Context, meta store.TorrentMeta) (*torrent.Torrent, error) {
 	if meta.TorrentURL != "" {
 		buf, err := fetchTorrentBuffer(ctx, meta.TorrentURL)
 		if err == nil {
-			mi, err := metainfo.Load(strings.NewReader(string(buf)))
+			mi, err := metainfo.Load(bytes.NewReader(buf))
 			if err == nil {
 				t, err := c.client.AddTorrent(mi)
 				if err == nil {
@@ -246,11 +268,12 @@ func (c *Client) StreamFile(w http.ResponseWriter, r *http.Request, torrentID st
 		w.Write([]byte(`{"error":"no_video_file"}`))
 		return nil
 	}
-	file.Download()
-
+	// Deliberately no file.Download() here: the reader below drives piece
+	// prioritization, so we only fetch what playback (plus readahead) needs
+	// instead of downloading the whole file in the background.
 	reader := file.NewReader()
 	defer reader.Close()
-	reader.SetReadahead(10 << 20)
+	reader.SetReadahead(16 << 20)
 	reader.SetResponsive()
 
 	c.readerInc(torrentID)
@@ -282,12 +305,14 @@ func (c *Client) readerDec(id string) {
 }
 
 func (c *Client) Cleanup(maxConcurrent int) {
+	idle := idleTimeout()
+	var doomed []string
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	now := time.Now()
 	for id, e := range c.active {
-		if e.readers == 0 && now.Sub(e.lastAccess) > idleTimeout() {
-			c.dropAndDelete(e)
+		if e.readers == 0 && now.Sub(e.lastAccess) > idle {
+			doomed = append(doomed, c.dropLocked(e))
 			delete(c.active, id)
 		}
 	}
@@ -302,34 +327,34 @@ func (c *Client) Cleanup(maxConcurrent int) {
 				cands = append(cands, cand{id, e.lastAccess})
 			}
 		}
-		for i := 0; i < len(cands); i++ {
-			for j := i + 1; j < len(cands); j++ {
-				if cands[j].ts.Before(cands[i].ts) {
-					cands[i], cands[j] = cands[j], cands[i]
-				}
-			}
-		}
+		sort.Slice(cands, func(i, j int) bool { return cands[i].ts.Before(cands[j].ts) })
 		for _, x := range cands {
 			if len(c.active) <= maxConcurrent {
 				break
 			}
-			c.dropAndDelete(c.active[x.id])
+			doomed = append(doomed, c.dropLocked(c.active[x.id]))
 			delete(c.active, x.id)
 		}
 	}
+	c.mu.Unlock()
+
+	removePaths(doomed)
 }
 
 func (c *Client) Shutdown() {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	for id, e := range c.active {
-		c.dropAndDelete(e)
+		c.dropLocked(e)
 		delete(c.active, id)
 	}
 	if c.client != nil {
 		_ = c.client.Close()
 		c.client = nil
 	}
+	c.mu.Unlock()
+
+	// Wiping the whole data dir covers every torrent's files, including
+	// orphans from fetch-fail paths.
 	if c.dataDir != "" && c.dataDir != "/" {
 		if err := os.RemoveAll(c.dataDir); err != nil {
 			log.Printf("[bt] shutdown removeAll %q: %v", c.dataDir, err)

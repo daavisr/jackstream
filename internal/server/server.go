@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/lborruto/jackstream/internal/bt"
@@ -19,11 +20,12 @@ import (
 	"github.com/lborruto/jackstream/internal/tmdb"
 )
 
+const Version = "1.2.0"
+
 // configure.html is copied from ../../public/configure.html so that
 // //go:embed can consume it (embed does not follow symlinks). Regenerate with:
 //
 //go:generate sh -c "cp ../../public/configure.html configure.html"
-//
 //go:embed configure.html
 var configureHTML []byte
 
@@ -42,7 +44,7 @@ type Manifest struct {
 func baseManifest() Manifest {
 	return Manifest{
 		ID:          "community.jackstream",
-		Version:     "1.1.2",
+		Version:     Version,
 		Name:        "jackstream",
 		Description: "Stream torrents from your Jackett instance directly in Stremio. Self-hosted, no debrid required.",
 		Resources:   []string{"stream"},
@@ -66,19 +68,25 @@ func configuredManifest() Manifest {
 }
 
 type Server struct {
-	bt        *bt.Client
-	maxConcur int
+	bt *bt.Client
+	// Written per-request from the incoming config, read concurrently by the
+	// cleanup goroutine — hence atomic.
+	maxConcur atomic.Int32
 }
 
-func New(c *bt.Client) *Server { return &Server{bt: c, maxConcur: 3} }
+func New(c *bt.Client) *Server {
+	s := &Server{bt: c}
+	s.maxConcur.Store(3)
+	return s
+}
 
 func (s *Server) SetMaxConcurrent(n int) {
 	if n > 0 {
-		s.maxConcur = n
+		s.maxConcur.Store(int32(n))
 	}
 }
 
-func (s *Server) MaxConcurrent() int { return s.maxConcur }
+func (s *Server) MaxConcurrent() int { return int(s.maxConcur.Load()) }
 
 func (s *Server) BuildHandler() http.Handler {
 	// The "stream list" route `/{config}/stream/{type}/{id...}` and the
@@ -168,25 +176,15 @@ func (s *Server) handleStreamList(w http.ResponseWriter, r *http.Request) {
 	titles := tmdb.TitleVariants(meta)
 	results := jackett.Search(r.Context(), titles, meta, kind, cfg)
 
-	filterable := make([]filter.Filterable, 0, len(results))
-	for _, rr := range results {
-		filterable = append(filterable, rr)
-	}
-	filtered := filter.Filter(filterable, cfg)
-
-	sortable := make([]sorter.Sortable, 0, len(filtered))
-	for _, f := range filtered {
-		sortable = append(sortable, f.(jackett.Result))
-	}
-	sorted := sorter.Sort(sortable, cfg.PreferredLanguage)
+	filtered := filter.Filter(results, cfg)
+	sorted := sorter.Sort(filtered, cfg.PreferredLanguage)
 	if len(sorted) > cfg.MaxResults {
 		sorted = sorted[:cfg.MaxResults]
 	}
 
 	base := strings.TrimRight(cfg.AddonPublicURL, "/")
 	streams := make([]map[string]any, 0, len(sorted))
-	for _, sv := range sorted {
-		rr := sv.(jackett.Result)
+	for _, rr := range sorted {
 		store.Set(rr.TorrentID, store.TorrentMeta{
 			TorrentURL:  rr.TorrentURL,
 			MagnetURI:   rr.MagnetURI,
@@ -234,7 +232,11 @@ func streamDescription(r jackett.Result) string {
 	if r.Parsed.Audio != "" {
 		aud = " • " + r.Parsed.Audio
 	}
-	return fmt.Sprintf("%s\n👥 %d seeds • 💾 %s%s%s", r.TitleStr, r.Seeders, size, src, aud)
+	codec := ""
+	if r.Parsed.Codec != "" {
+		codec = " • " + r.Parsed.Codec
+	}
+	return fmt.Sprintf("%s\n👥 %d seeds • 💾 %s%s%s%s", r.TitleStr, r.Seeders, size, src, codec, aud)
 }
 
 func formatSize(bytes int64) string {

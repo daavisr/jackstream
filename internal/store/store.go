@@ -27,5 +27,3 @@ func Set(torrentID string, m TorrentMeta) {
 func Get(torrentID string) (TorrentMeta, bool) {
 	return store.Get(torrentID)
 }
-
-func Clear() { store.Clear() }

@@ -18,7 +18,6 @@ import (
 type Meta struct {
 	Type         string
 	Title        string
-	TitleFr      string
 	TitleEn      string
 	Year         int
 	Season       int
@@ -177,7 +176,6 @@ func Resolve(ctx context.Context, raw, apiKey string) (Meta, error) {
 		return Meta{
 			Type:         "series",
 			Title:        tv.Name,
-			TitleFr:      tv.Name,
 			TitleEn:      tv.OriginalName,
 			Year:         year(tv.FirstAirDate),
 			Season:       id.Season,
@@ -191,7 +189,6 @@ func Resolve(ctx context.Context, raw, apiKey string) (Meta, error) {
 		return Meta{
 			Type:    "movie",
 			Title:   m.Title,
-			TitleFr: m.Title,
 			TitleEn: m.OriginalTitle,
 			Year:    year(m.ReleaseDate),
 		}, nil
@@ -202,7 +199,6 @@ func Resolve(ctx context.Context, raw, apiKey string) (Meta, error) {
 		return Meta{
 			Type:    "series",
 			Title:   tv.Name,
-			TitleFr: tv.Name,
 			TitleEn: tv.OriginalName,
 			Year:    year(tv.FirstAirDate),
 		}, nil
@@ -214,7 +210,7 @@ func Resolve(ctx context.Context, raw, apiKey string) (Meta, error) {
 func TitleVariants(m Meta) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, t := range []string{m.Title, m.TitleFr, m.TitleEn} {
+	for _, t := range []string{m.Title, m.TitleEn} {
 		if t == "" || seen[t] {
 			continue
 		}

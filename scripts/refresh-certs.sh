@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Re-fetches the bundled *.local-ip.medicmobile.org cert. Run manually before
-# releasing a new image if the prior cert is near expiry (LE rotates every ~60d).
+# Re-fetches the embedded *.local-ip.medicmobile.org fallback cert. The app
+# refreshes its serving cert at runtime, so this only matters for the
+# cold-start window; refresh occasionally before cutting a release.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 curl -sfL https://local-ip.medicmobile.org/fullchain -o certs/fullchain.pem

@@ -62,22 +62,22 @@ type key struct {
 	q, s, h, boost, seed, i int
 }
 
-type entry struct {
-	v Sortable
+type entry[T Sortable] struct {
+	v T
 	k key
 }
 
 // Sort returns a new slice ordered by a cascade of keys:
 // quality > source > hdr > language boost > seeders, with a stable tie-break
 // on original input position. The input slice is not mutated.
-func Sort(ts []Sortable, preferredLanguage string) []Sortable {
-	out := make([]Sortable, len(ts))
+func Sort[T Sortable](ts []T, preferredLanguage string) []T {
+	out := make([]T, len(ts))
 	copy(out, ts)
 
-	entries := make([]entry, len(out))
+	entries := make([]entry[T], len(out))
 	for i, t := range out {
 		p := t.ParsedTitle()
-		entries[i] = entry{
+		entries[i] = entry[T]{
 			v: t,
 			k: key{
 				q:     score(qualityScore, p.Quality),

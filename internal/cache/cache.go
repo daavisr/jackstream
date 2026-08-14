@@ -11,18 +11,22 @@ type entry[V any] struct {
 }
 
 type Cache[V any] struct {
-	mu    sync.Mutex
-	store map[string]entry[V]
-	now   func() time.Time
+	mu      sync.Mutex
+	store   map[string]entry[V]
+	now     func() time.Time
+	sweepAt int
 }
+
+const minSweepAt = 64
 
 func New[V any](now func() time.Time) *Cache[V] {
 	if now == nil {
 		now = time.Now
 	}
 	return &Cache[V]{
-		store: make(map[string]entry[V]),
-		now:   now,
+		store:   make(map[string]entry[V]),
+		now:     now,
+		sweepAt: minSweepAt,
 	}
 }
 
@@ -46,6 +50,17 @@ func (c *Cache[V]) Set(key string, value V, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.store[key] = entry[V]{value: value, expiresAt: c.now().Add(ttl)}
+	// Amortized sweep: entries that are never Get again would otherwise
+	// accumulate forever. Sweeping when the map doubles keeps Set at O(1).
+	if len(c.store) >= c.sweepAt {
+		now := c.now()
+		for k, e := range c.store {
+			if !now.Before(e.expiresAt) {
+				delete(c.store, k)
+			}
+		}
+		c.sweepAt = max(2*len(c.store), minSweepAt)
+	}
 }
 
 func (c *Cache[V]) Clear() {

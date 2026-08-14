@@ -3,6 +3,13 @@ services:
     image: ghcr.io/lborruto/jackstream:latest
     container_name: jackstream
     ports:
-      - "7000:7000"
-      - "7001:7001"
+      - "7000:7000"   # HTTP (configure page + localhost Stremio)
+      - "7001:7001"   # HTTPS (for Stremio clients on other LAN devices)
     restart: unless-stopped
+    # Optional: keep in-flight torrent pieces off the container's writable
+    # layer (they are auto-deleted when a torrent goes idle, but a bind mount
+    # or tmpfs gives you explicit control over where they live):
+    # environment:
+    #   - DATA_DIR=/data
+    # volumes:
+    #   - /path/on/host:/data

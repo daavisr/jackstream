@@ -44,7 +44,7 @@ func buildBlacklistRegex(kw []string) *regexp.Regexp {
 	return regexp.MustCompile(`(?i)\b(?:` + strings.Join(parts, "|") + `)\b`)
 }
 
-func Filter(items []Filterable, c config.Config) []Filterable {
+func Filter[T Filterable](items []T, c config.Config) []T {
 	maxQ, minQ := c.MaxQuality, c.MinQuality
 	var maxBytes, minBytes int64
 	if c.MaxSizeGb > 0 {
@@ -55,7 +55,7 @@ func Filter(items []Filterable, c config.Config) []Filterable {
 	}
 	blRe := buildBlacklistRegex(c.BlacklistKeywords)
 
-	out := make([]Filterable, 0, len(items))
+	out := make([]T, 0, len(items))
 	for _, it := range items {
 		q := it.ParsedTitle().Quality
 		if maxQ != "" && rankOf(q) > rankOf(maxQ) {

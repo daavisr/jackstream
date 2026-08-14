@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"net/http"
 
 	"github.com/lborruto/jackstream/internal/config"
@@ -18,6 +19,6 @@ func (s *Server) handleStreamFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.bt.StreamFile(w, r, tid); err != nil {
-		_ = err
+		log.Printf("[stream] %s: %v", tid, err)
 	}
 }

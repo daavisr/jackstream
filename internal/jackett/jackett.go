@@ -53,8 +53,6 @@ var (
 	btihRe     = regexp.MustCompile(`xt=urn:btih:([a-zA-Z0-9]+)`)
 )
 
-func SetHTTPClient(c *http.Client) { httpClient = c }
-
 func requestTimeout() time.Duration {
 	ms, _ := strconv.Atoi(os.Getenv("REQUEST_TIMEOUT_MS"))
 	if ms <= 0 {

@@ -2,8 +2,10 @@ package server
 
 import _ "embed"
 
-// The PEM files are copied from ../../certs/ so //go:embed can read them
-// (embed does not follow symlinks). Refresh with: go generate ./internal/server
+// Embedded fallback keypair, only used until the first successful runtime
+// refresh (see CertManager). The PEM files are copied from ../../certs/ so
+// //go:embed can read them (embed does not follow symlinks). Refresh with:
+// go generate ./internal/server
 
 //go:generate sh -c "cp ../../certs/fullchain.pem embed/fullchain.pem"
 //go:embed embed/fullchain.pem

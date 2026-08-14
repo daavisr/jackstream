@@ -40,9 +40,10 @@ Stremio app
 [anacrolix/torrent singleton]
     │
     ├─ Download .torrent via Jackett (with passkeys)
-    ├─ Sequential priority, critical first pieces
+    ├─ Reader-driven piece prioritization (responsive + 16 MB readahead) —
+    │  only the parts you actually watch are downloaded
     ├─ Wait for torrent metadata, then serve via http.ServeContent (Range-aware)
-    └─ Clean up idle torrents, respect maxConcurrentTorrents
+    └─ Clean up idle torrents + their on-disk pieces, respect maxConcurrentTorrents
 ```
 
 ## Features
@@ -50,11 +51,11 @@ Stremio app
 - 🪶 Static Go binary — ~20 MB Docker image on `scratch` base, <50 ms startup, ~30 MB RSS
 - 🧲 Direct streaming from Jackett results, no debrid, no qBittorrent
 - 🔒 Private-tracker friendly: uses Jackett's proxied `.torrent` URLs with passkeys; DHT / LSD / µTP disabled
-- 🔐 HTTPS out of the box via a bundled wildcard cert — no reverse proxy needed for LAN clients
+- 🔐 HTTPS out of the box via a self-refreshing wildcard cert — no reverse proxy, no rebuilds when it rotates
 - ⚙️ Per-user credentials encoded in the addon URL (zero server-side storage)
 - 💾 Client-side config persistence (localStorage) + bookmarkable `/<config>/configure` URL
 - 🎬 Movies + TV series (anime covered via category `5070`)
-- 🌍 TMDB-powered title resolution with FR/EN variants for better search coverage
+- 🌍 TMDB-powered title resolution with localized + original-title variants for better search coverage
 - 🏷️ Quality / source / HDR / codec / audio detection
 - 🎚️ Advanced filters: preferred language, quality floor/ceiling, size bounds, blacklist keywords
 - 📦 Single Docker container, no volumes, multi-arch (amd64 + arm64)
@@ -130,18 +131,20 @@ All filters are stored in the base64-encoded addon URL, so different Stremio ins
 
 ## HTTPS details
 
-jackstream ships a pre-baked TLS cert + key from <https://local-ip.medicmobile.org> — a community service that issues a public `*.local-ip.medicmobile.org` Let's Encrypt certificate and operates a DNS server where `<dashed-ip>.local-ip.medicmobile.org` resolves to `<ip>`. This gives you valid HTTPS for any LAN IP with zero setup.
+jackstream uses the wildcard TLS cert from <https://local-ip.medicmobile.org> — a community service that issues a public `*.local-ip.medicmobile.org` Let's Encrypt certificate and operates a DNS server where `<dashed-ip>.local-ip.medicmobile.org` resolves to `<ip>`. This gives you valid HTTPS for any LAN IP with zero setup.
+
+The cert is **refreshed automatically at runtime**: on startup and every 12 h the addon re-fetches the current cert + key from the service and hot-swaps it into the running HTTPS listener — no restart, no image rebuild when Let's Encrypt rotates it (~every 60 days). An embedded copy is baked into the binary as a fallback so HTTPS still comes up when the service is briefly unreachable.
 
 The HTTPS listener binds on port **7001** alongside the HTTP listener on **7000**. Stremio clients hit the HTTPS URL; the TCP connection still goes directly to your LAN host.
 
 ### Tradeoffs
 
-- The TLS private key is public (by design — same key in every copy of this image). Anyone who can also control DNS on your network could MITM; on a trusted home LAN this is a non-issue. Not suitable for addons exposed to the public internet.
-- The service is community-run (Medic Mobile). If it goes offline, bundled certs will eventually expire and you'll need to swap them. Run `./scripts/refresh-certs.sh` before building a new image to pull fresh certs.
+- The TLS private key is public (by design — anyone can download it from the service). Anyone who can also control DNS on your network could MITM; on a trusted home LAN this is a non-issue. Not suitable for addons exposed to the public internet.
+- The service is community-run (Medic Mobile). If it goes offline, the last successfully fetched cert keeps serving until it expires (a warning is logged from 14 days out); after that, switch to your own cert (below).
 
 ### Using your own cert instead
 
-Mount a cert + key and point the addon at them:
+Mount a cert + key and point the addon at them (this pins your cert — auto-refresh is disabled and renewal is up to you):
 
 ```yaml
 services:
@@ -164,13 +167,13 @@ Works with Caddy-issued certs, mkcert, Let's Encrypt, or anything else.
 
 Set `HTTPS_DISABLED=1` to skip the HTTPS listener (HTTP-only). Useful if you front the addon with Caddy / Nginx / Traefik that already terminates TLS.
 
-### Refreshing the bundled cert
+### Refreshing the embedded fallback cert
 
-The cert expires every ~60 days (Let's Encrypt rotation). Before a rebuild:
+Rotation is handled at runtime, so this is **not needed for running installs**. The embedded copy only matters for the first seconds after a cold start while the fresh cert is fetched — refreshing it occasionally before a release keeps that window valid:
 
 ```bash
 ./scripts/refresh-certs.sh
-git commit -am "chore: refresh bundled local-ip cert"
+git commit -am "chore: refresh embedded local-ip fallback cert"
 ```
 
 ## FAQ
@@ -201,19 +204,30 @@ Most often because the container restarted (e.g. Komodo redeploy) and the in-mem
 
 ## Environment variables
 
-| Variable                   | Default                 | Meaning                                  |
-| -------------------------- | ----------------------- | ---------------------------------------- |
-| `PORT`                     | `7000`                  | Port to listen on                        |
-| `CACHE_TTL_MINUTES`        | `1440`                  | TMDB cache TTL                           |
-| `REQUEST_TIMEOUT_MS`       | `8000`                  | Jackett/TMDB timeout                     |
-| `STREAM_READY_TIMEOUT_S`   | `60`                    | Max wait for first pieces                |
-| `TORRENT_IDLE_TIMEOUT_MIN` | `30`                    | Idle minutes before stopping a torrent   |
-| `HTTPS_PORT`               | `7001`                  | Port for the HTTPS listener              |
-| `HTTPS_CERT_PATH`          | `./certs/fullchain.pem` | Path to TLS certificate (PEM)            |
-| `HTTPS_KEY_PATH`           | `./certs/key.pem`       | Path to TLS private key (PEM)            |
-| `HTTPS_DISABLED`           | _(unset)_               | Set to `1` to disable the HTTPS listener |
+| Variable                   | Default           | Meaning                                                              |
+| -------------------------- | ----------------- | -------------------------------------------------------------------- |
+| `PORT`                     | `7000`            | Port to listen on                                                     |
+| `DATA_DIR`                 | `/tmp/jackstream` | Where in-flight torrent pieces are stored (auto-cleaned)               |
+| `CACHE_TTL_MINUTES`        | `1440`            | TMDB cache TTL                                                         |
+| `REQUEST_TIMEOUT_MS`       | `8000`            | Jackett/TMDB timeout                                                   |
+| `STREAM_READY_TIMEOUT_S`   | `60`              | Max wait for first pieces                                              |
+| `TORRENT_IDLE_TIMEOUT_MIN` | `30`              | Idle minutes before stopping a torrent and deleting its pieces         |
+| `HTTPS_PORT`               | `7001`            | Port for the HTTPS listener                                            |
+| `HTTPS_CERT_PATH`          | _(unset)_         | Path to your own TLS certificate (PEM). Disables cert auto-refresh    |
+| `HTTPS_KEY_PATH`           | _(unset)_         | Path to your own TLS private key (PEM). Both paths must be set        |
+| `HTTPS_DISABLED`           | _(unset)_         | Set to `1` to disable the HTTPS listener                               |
 
 ## Changelog
+
+### v1.2.0 — Self-refreshing HTTPS + leaner downloads (2026-08-14)
+
+- 🔐 **TLS cert now auto-refreshes at runtime.** The addon fetches the current `local-ip.medicmobile.org` cert on startup and every 12 h and hot-swaps it into the HTTPS listener — no more image rebuild every ~60 days. The embedded cert is now only a cold-start fallback; a warning is logged if refresh keeps failing within 14 days of expiry. `HTTPS_CERT_PATH`/`HTTPS_KEY_PATH` still pin your own cert (auto-refresh off).
+- 📉 **Streams no longer download the whole file in the background.** Piece prioritization is now driven purely by playback position (+16 MB readahead), so skipping through or abandoning a stream no longer pulls the full release to disk. Less bandwidth, less disk, kinder to private-tracker ratios.
+- 💾 `DATA_DIR` env var to choose where in-flight pieces are stored (default `/tmp/jackstream`).
+- 🏷️ Detected codec (x264 / x265 / AV1) now shown in the stream description.
+- 🧹 Internal polish: fixed a data race on the max-concurrent-torrents setting, expired stream-session entries are now reclaimed even when never re-read, torrent-file fetches are time- and size-bounded, disk deletion no longer blocks stream requests, and dead code was removed.
+
+No breaking changes. Existing addon install URLs continue to work unchanged.
 
 ### v1.1.1 — Disk cleanup (2026-04-23)
 

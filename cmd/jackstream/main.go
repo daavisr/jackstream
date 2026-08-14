@@ -30,18 +30,21 @@ func main() {
 	if err != nil {
 		log.Fatalf("bt.NewClient: %v", err)
 	}
-	defer btClient.Shutdown()
 
 	srv := server.New(btClient)
 	handler := srv.BuildHandler()
 
-	stopCleanup := make(chan struct{})
+	// Root context cancels the background goroutines (torrent cleanup, cert
+	// refresh) on shutdown.
+	rootCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+
 	go func() {
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
 			select {
-			case <-stopCleanup:
+			case <-rootCtx.Done():
 				return
 			case <-t.C:
 				btClient.Cleanup(srv.MaxConcurrent())
@@ -62,14 +65,15 @@ func main() {
 
 	var httpsSrv *http.Server
 	if os.Getenv("HTTPS_DISABLED") != "1" && os.Getenv("HTTPS_DISABLED") != "true" {
-		cert, kpErr := loadCert()
-		if kpErr != nil {
-			log.Printf("[https] disabled (%v)", kpErr)
+		cm, cmErr := server.NewCertManager(os.Getenv("HTTPS_CERT_PATH"), os.Getenv("HTTPS_KEY_PATH"))
+		if cmErr != nil {
+			log.Printf("[https] disabled (%v)", cmErr)
 		} else {
+			cm.StartAutoRefresh(rootCtx)
 			httpsSrv = &http.Server{
 				Addr:      ":" + strconv.Itoa(httpsPort),
 				Handler:   handler,
-				TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+				TLSConfig: &tls.Config{GetCertificate: cm.GetCertificate},
 			}
 			go func() {
 				log.Printf("jackstream https listening on :%d", httpsPort)
@@ -85,7 +89,7 @@ func main() {
 	<-sig
 	log.Printf("received signal, shutting down")
 
-	close(stopCleanup)
+	stop()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -94,13 +98,4 @@ func main() {
 		_ = httpsSrv.Shutdown(ctx)
 	}
 	btClient.Shutdown()
-}
-
-func loadCert() (tls.Certificate, error) {
-	certPath := os.Getenv("HTTPS_CERT_PATH")
-	keyPath := os.Getenv("HTTPS_KEY_PATH")
-	if certPath != "" && keyPath != "" {
-		return tls.LoadX509KeyPair(certPath, keyPath)
-	}
-	return tls.X509KeyPair(server.CertPEM, server.KeyPEM)
 }
