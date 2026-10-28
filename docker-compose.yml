@@ -1,7 +1,21 @@
 services:
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    container_name: jackett
+    environment:
+      - AUTO_UPDATE=true #optional
+      - RUN_OPTS= #optional
+    restart: unless-stopped
+    ports:
+      - 9117:9117
+    volumes:
+      - jackett-config:/config
+      - jackett-downloads:/downloads
+      
   jackstream:
     image: ghcr.io/lborruto/jackstream:latest
     container_name: jackstream
+    build: .
     ports:
       - "7000:7000"   # HTTP (configure page + localhost Stremio)
       - "7001:7001"   # HTTPS (for Stremio clients on other LAN devices)
@@ -13,3 +27,6 @@ services:
     #   - DATA_DIR=/data
     # volumes:
     #   - /path/on/host:/data
+volumes:
+  jackett-config:
+  jackett-downloads:

@@ -22,14 +22,15 @@ import (
 )
 
 type Result struct {
-	TitleStr   string
-	TorrentURL string
-	MagnetURI  string
-	SizeBytes  int64
-	Seeders    int
-	InfoHash   string
-	TorrentID  string
-	Parsed     parser.Parsed
+	TitleStr    string
+	TorrentURL  string
+	MagnetURI   string
+	SizeBytes   int64
+	Seeders     int
+	InfoHash    string
+	TorrentID   string
+	Freeleech   bool
+	Parsed      parser.Parsed
 }
 
 // Implement sorter.Sortable + filter.Filterable.
@@ -40,11 +41,12 @@ func (r Result) ParsedTitle() parser.Parsed { return r.Parsed }
 
 type jackettResponse struct {
 	Results []struct {
-		Title     string `json:"Title"`
-		Link      string `json:"Link"`
-		MagnetURI string `json:"MagnetUri"`
-		Size      int64  `json:"Size"`
-		Seeders   int    `json:"Seeders"`
+		Title               string   `json:"Title"`
+		Link                string   `json:"Link"`
+		MagnetURI           string   `json:"MagnetUri"`
+		Size                int64    `json:"Size"`
+		Seeders             int      `json:"Seeders"`
+		DownloadVolumeFactor *float64 `json:"DownloadVolumeFactor"`
 	} `json:"Results"`
 }
 
@@ -67,6 +69,9 @@ var categoriesByKind = map[string][]string{
 }
 
 func buildQuery(title string, meta tmdb.Meta, kind string) string {
+	if kind == "movie" && title == meta.IMDB {
+		return title
+	}
 	switch kind {
 	case "series":
 		if meta.Season > 0 || meta.Episode > 0 {
@@ -136,6 +141,7 @@ func searchOneVariant(ctx context.Context, title string, meta tmdb.Meta, kind st
 		if src == "" {
 			continue
 		}
+		freeleech := r.DownloadVolumeFactor != nil && *r.DownloadVolumeFactor == 0
 		out = append(out, Result{
 			TitleStr:   r.Title,
 			TorrentURL: r.Link,
@@ -144,17 +150,32 @@ func searchOneVariant(ctx context.Context, title string, meta tmdb.Meta, kind st
 			Seeders:    r.Seeders,
 			InfoHash:   ih,
 			TorrentID:  torrentIDOf(src),
+			Freeleech:  freeleech,
 			Parsed:     parser.Parse(r.Title),
 		})
 	}
 	return out
 }
 
-// Search fans out across titles, dedups by infoHash (fallback to torrent URL), returns combined set.
+// Search fans out across titles, adding an IMDb query for movies, and deduplicates results.
 func Search(ctx context.Context, titles []string, meta tmdb.Meta, kind string, c config.Config) []Result {
+	variants := append([]string(nil), titles...)
+	if kind == "movie" && meta.IMDB != "" {
+		hasIMDB := false
+		for _, title := range variants {
+			if title == meta.IMDB {
+				hasIMDB = true
+				break
+			}
+		}
+		if !hasIMDB {
+			variants = append(variants, meta.IMDB)
+		}
+	}
+
 	var wg sync.WaitGroup
-	results := make([][]Result, len(titles))
-	for i, t := range titles {
+	results := make([][]Result, len(variants))
+	for i, t := range variants {
 		i, t := i, t
 		wg.Add(1)
 		go func() {
@@ -164,18 +185,22 @@ func Search(ctx context.Context, titles []string, meta tmdb.Meta, kind string, c
 	}
 	wg.Wait()
 
-	seen := map[string]struct{}{}
+	seenHashes := map[string]struct{}{}
+	seenURLs := map[string]struct{}{}
 	var merged []Result
 	for _, set := range results {
 		for _, r := range set {
-			key := r.InfoHash
-			if key == "" {
-				key = "url:" + r.TorrentURL
-			}
-			if _, ok := seen[key]; ok {
+			_, hashSeen := seenHashes[r.InfoHash]
+			_, urlSeen := seenURLs[r.TorrentURL]
+			if (r.InfoHash != "" && hashSeen) || (r.TorrentURL != "" && urlSeen) {
 				continue
 			}
-			seen[key] = struct{}{}
+			if r.InfoHash != "" {
+				seenHashes[r.InfoHash] = struct{}{}
+			}
+			if r.TorrentURL != "" {
+				seenURLs[r.TorrentURL] = struct{}{}
+			}
 			merged = append(merged, r)
 		}
 	}

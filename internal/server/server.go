@@ -14,7 +14,6 @@ import (
 	"github.com/lborruto/jackstream/internal/config"
 	"github.com/lborruto/jackstream/internal/filter"
 	"github.com/lborruto/jackstream/internal/jackett"
-	"github.com/lborruto/jackstream/internal/parser"
 	"github.com/lborruto/jackstream/internal/sorter"
 	"github.com/lborruto/jackstream/internal/store"
 	"github.com/lborruto/jackstream/internal/tmdb"
@@ -194,7 +193,7 @@ func (s *Server) handleStreamList(w http.ResponseWriter, r *http.Request) {
 			ParsedTitle: rr.Parsed,
 		})
 		streams = append(streams, map[string]any{
-			"name":        streamName(rr.Parsed),
+			"name":        streamName(rr),
 			"description": streamDescription(rr),
 			"url":         fmt.Sprintf("%s/stream/%s/%s/0", base, raw, rr.TorrentID),
 			"behaviorHints": map[string]any{
@@ -207,8 +206,12 @@ func (s *Server) handleStreamList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"streams": streams})
 }
 
-func streamName(p parser.Parsed) string {
+func streamName(r jackett.Result) string {
+	p := r.Parsed
 	parts := []string{}
+	if r.Freeleech {
+		parts = append(parts, "🆓 FREE")
+	}
 	if p.Quality != "" {
 		parts = append(parts, p.Quality)
 	}
@@ -236,7 +239,11 @@ func streamDescription(r jackett.Result) string {
 	if r.Parsed.Codec != "" {
 		codec = " • " + r.Parsed.Codec
 	}
-	return fmt.Sprintf("%s\n👥 %d seeds • 💾 %s%s%s%s", r.TitleStr, r.Seeders, size, src, codec, aud)
+	free := ""
+	if r.Freeleech {
+		free = " • 🆓 FREELEECH"
+	}
+	return fmt.Sprintf("%s\n👥 %d seeds • 💾 %s%s%s%s%s", r.TitleStr, r.Seeders, size, src, codec, aud, free)
 }
 
 func formatSize(bytes int64) string {

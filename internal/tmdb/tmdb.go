@@ -17,6 +17,7 @@ import (
 
 type Meta struct {
 	Type         string
+	IMDB         string
 	Title        string
 	TitleEn      string
 	Year         int
@@ -175,6 +176,7 @@ func Resolve(ctx context.Context, raw, apiKey string) (Meta, error) {
 		tv := find.TVResults[0]
 		return Meta{
 			Type:         "series",
+			IMDB:         id.IMDB,
 			Title:        tv.Name,
 			TitleEn:      tv.OriginalName,
 			Year:         year(tv.FirstAirDate),
@@ -188,6 +190,7 @@ func Resolve(ctx context.Context, raw, apiKey string) (Meta, error) {
 		m := find.MovieResults[0]
 		return Meta{
 			Type:    "movie",
+			IMDB:    id.IMDB,
 			Title:   m.Title,
 			TitleEn: m.OriginalTitle,
 			Year:    year(m.ReleaseDate),
@@ -198,6 +201,7 @@ func Resolve(ctx context.Context, raw, apiKey string) (Meta, error) {
 		tv := find.TVResults[0]
 		return Meta{
 			Type:    "series",
+			IMDB:    id.IMDB,
 			Title:   tv.Name,
 			TitleEn: tv.OriginalName,
 			Year:    year(tv.FirstAirDate),
